@@ -1,0 +1,13 @@
+# Sync-HTTP-MCP 客户端依赖 - 最小化版本
+# 极简配置，只包含基本功能所需的依赖
+
+# 使用最小依赖集
+requests>=2.25.0    # 使用requests替代aiohttp
+websocket-client>=1.0.0  # 使用websocket-client替代websockets
+
+# 可选依赖
+# watchdog>=2.1.0   # 文件系统监控，如需文件监控功能请取消注释
+# PyQt5>=5.12.0     # GUI框架，如需图形界面请取消注释
+
+# 镜像加速安装命令
+# pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r client-requirements.txt 
