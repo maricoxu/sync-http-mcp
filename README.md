@@ -20,7 +20,9 @@ pip install requests
 ### 服务器依赖
 
 ```bash
-pip install fastapi uvicorn aiofiles
+# 登录到内网服务器
+relay-cli
+ssh ${yourserver}
 
 # Git同步功能依赖
 pip install GitPython

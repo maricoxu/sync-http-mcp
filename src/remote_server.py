@@ -740,6 +740,8 @@ def get_conflicts(path: str) -> Dict[str, Any]:
         logger.error(f"获取冲突信息失败: {str(e)}")
         return {"status": "error", "message": f"获取冲突信息失败: {str(e)}"}
 
+CACHE_FILE = Path(__file__).parent / ".remote_cache.json" # Cache file path
+
 
 # WebSocket连接管理
 class ConnectionManager:
@@ -1415,6 +1417,7 @@ async def websocket_endpoint(websocket: WebSocket):
         manager.disconnect(websocket)
 
 
+<<<<<<< HEAD
 # Git同步API端点
 @app.post("/api/v1/sync/init")
 def init_sync_repo(git_init: GitInitRequest):
@@ -1628,6 +1631,48 @@ async def create_directory(request: dict):
     except Exception as e:
         logger.error(f"创建目录失败: {str(e)}")
         raise HTTPException(status_code=500, detail=f"创建目录失败: {str(e)}")
+=======
+@app.on_event("startup")
+async def startup_event():
+    logger.info("Server startup")
+    await load_metadata_cache() # Load cache on startup
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    logger.info("Server shutting down")
+    await save_metadata_cache() # Save cache on shutdown
+
+
+async def load_metadata_cache():
+    """Load file metadata cache from file"""
+    global file_metadata_cache
+    if CACHE_FILE.exists():
+        try:
+            async with aiofiles.open(CACHE_FILE, 'r', encoding='utf-8') as f:
+                content = await f.read()
+                file_metadata_cache = json.loads(content)
+            logger.info(f"Metadata cache loaded from {CACHE_FILE}")
+        except Exception as e:
+            logger.error(f"Failed to load metadata cache from {CACHE_FILE}: {e}")
+            file_metadata_cache = {} # Reset cache on error
+    else:
+        logger.info(f"Metadata cache file not found: {CACHE_FILE}. Starting with empty cache.")
+        file_metadata_cache = {}
+
+async def save_metadata_cache():
+    """Save file metadata cache to file"""
+    global file_metadata_cache
+    try:
+        # Ensure directory exists
+        CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        async with aiofiles.open(CACHE_FILE, 'w', encoding='utf-8') as f:
+            # Convert Pydantic models to dict before saving
+            cache_data_to_save = {k: v if isinstance(v, dict) else v.model_dump() for k, v in file_metadata_cache.items()}
+            await f.write(json.dumps(cache_data_to_save, indent=4))
+        logger.info(f"Metadata cache saved to {CACHE_FILE}")
+    except Exception as e:
+        logger.error(f"Failed to save metadata cache to {CACHE_FILE}: {e}")
+>>>>>>> f98f016 (修复增量同步失效问题)
 
 
 # 如果作为主程序运行
