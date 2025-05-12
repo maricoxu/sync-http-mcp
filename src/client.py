@@ -30,6 +30,13 @@ try:
 except ImportError:
     DELTA_SYNC_AVAILABLE = False
 
+# 尝试导入Git增量同步模块
+try:
+    from git_sync import GitSyncManager
+    GIT_SYNC_AVAILABLE = True
+except ImportError:
+    GIT_SYNC_AVAILABLE = False
+
 # 配置日志
 logging.basicConfig(
     level=logging.INFO,
@@ -69,6 +76,52 @@ class SimplifiedMCPClient:
             self.delta_calculator = None
         
         logger.info(f"MCP客户端初始化 - 服务器: {server_url}, 工作区: {workspace_path}")
+    
+    def post(self, endpoint: str, data: dict) -> dict:
+        """
+        向服务器发送POST请求
+        
+        Args:
+            endpoint: API端点路径
+            data: 要发送的JSON数据
+            
+        Returns:
+            服务器响应的JSON数据
+        """
+        try:
+            response = self.session.post(f"{self.server_url}{endpoint}", json=data)
+            if response.status_code == 200:
+                return response.json()
+            else:
+                error_text = response.text
+                logger.error(f"POST请求失败: {response.status_code} - {error_text}")
+                return {"status": "error", "message": error_text}
+        except Exception as e:
+            logger.error(f"POST请求错误: {str(e)}")
+            return {"status": "error", "message": str(e)}
+    
+    def get(self, endpoint: str, params: dict = None) -> dict:
+        """
+        向服务器发送GET请求
+        
+        Args:
+            endpoint: API端点路径
+            params: 查询参数
+            
+        Returns:
+            服务器响应的JSON数据
+        """
+        try:
+            response = self.session.get(f"{self.server_url}{endpoint}", params=params)
+            if response.status_code == 200:
+                return response.json()
+            else:
+                error_text = response.text
+                logger.error(f"GET请求失败: {response.status_code} - {error_text}")
+                return {"status": "error", "message": error_text}
+        except Exception as e:
+            logger.error(f"GET请求错误: {str(e)}")
+            return {"status": "error", "message": str(e)}
     
     def connect(self):
         """建立与服务器的连接"""
@@ -577,7 +630,10 @@ class SimplifiedMCPClient:
             return {"status": "error", "message": "不支持的路径类型或参数"}
 
 
-# 命令行功能
+# 兼容性别名，用于支持旧的调用方式
+Client = SimplifiedMCPClient
+
+
 def main():
     """命令行入口点"""
     import argparse
@@ -595,6 +651,10 @@ def main():
     parser.add_argument("--command", "-c", help="要执行的命令")
     parser.add_argument("--dir", "-d", help="命令执行目录 (默认: /home)")
     parser.add_argument("--no-delta", action="store_true", help="禁用增量同步功能")
+    parser.add_argument("--sync-mode", choices=["block", "git"], default="git",
+                      help="同步模式：block (块级增量同步) 或 git (Git增量同步)，默认为git")
+    parser.add_argument("--block", action="store_true", 
+                      help="使用块级增量同步（覆盖--sync-mode设置）")
     
     subparsers = parser.add_subparsers(dest="action", help="操作")
     
@@ -616,6 +676,24 @@ def main():
     sync_parser = subparsers.add_parser("sync", help="同步目录")
     sync_parser.add_argument("local_path", nargs="?", default=".", help="本地目录路径 (默认: 当前目录)")
     sync_parser.add_argument("remote_path", nargs="?", default="/home", help="远程目录路径 (默认: /home)")
+    sync_parser.add_argument("--git", action="store_true", help="使用Git增量同步（覆盖全局设置）")
+    sync_parser.add_argument("--block", action="store_true", help="使用块级增量同步（覆盖全局设置）")
+    
+    # Git同步相关命令
+    if GIT_SYNC_AVAILABLE:
+        # git-init命令
+        git_init_parser = subparsers.add_parser("git-init", help="初始化Git同步环境")
+        git_init_parser.add_argument("--force", "-f", action="store_true", help="强制初始化")
+        git_init_parser.add_argument("--remote-path", help="服务器上的远程目录路径（默认: 与本地工作区同名）")
+        
+        # git-status命令
+        git_status_parser = subparsers.add_parser("git-status", help="显示Git同步状态")
+        git_status_parser.add_argument("--verbose", "-v", action="store_true", help="显示详细信息")
+        
+        # git-resolve命令
+        git_resolve_parser = subparsers.add_parser("git-resolve", help="解决Git同步冲突")
+        git_resolve_parser.add_argument("--strategy", choices=["local", "remote", "interactive"], 
+                                      default="interactive", help="冲突解决策略")
     
     # 清理缓存子命令
     clean_parser = subparsers.add_parser("clean", help="清理元数据缓存")
@@ -637,7 +715,108 @@ def main():
     print(f"连接到服务器: {args.server}")
     print(f"本地工作区: {args.workspace}")
     
-    # 创建客户端实例
+    # 检查是否使用Git同步模式
+    use_git_sync = True  # 默认使用Git同步
+    
+    # 如果全局或命令级别指定了块级同步，则使用块级同步
+    if args.block or (args.action == "sync" and args.block):
+        use_git_sync = False
+        print("使用块级增量同步模式")
+    elif args.sync_mode == "block":
+        use_git_sync = False
+        print("使用块级增量同步模式")
+    else:
+        # 默认或明确指定使用Git同步
+        if GIT_SYNC_AVAILABLE:
+            print("使用Git增量同步模式")
+        else:
+            print("警告: Git增量同步模块不可用，将使用块级增量同步")
+            use_git_sync = False
+    
+    if use_git_sync:
+        from client_commands import GitSyncClient
+        client = GitSyncClient(args.workspace, args.server)
+        
+        try:
+            if args.action == "sync":
+                success = client.sync(auto_commit=True, verbose=True)
+                if not success:
+                    print("Git同步失败，尝试使用块级同步API作为后备")
+                    # 回退到块级同步
+                    standard_client = SimplifiedMCPClient(args.server, args.workspace, use_delta_sync=True)
+                    connect_result = standard_client.connect()
+                    if connect_result:
+                        print("使用块级同步API传输文件...")
+                        result = standard_client.sync_local_to_remote(args.local_path if hasattr(args, 'local_path') and args.local_path else ".", 
+                                                               args.remote_path if hasattr(args, 'remote_path') and args.remote_path else "/home")
+                        print(f"同步结果: {result['status']}")
+                        print(f"成功: {result.get('synchronized', 0)} 个文件")
+                        print(f"失败: {result.get('failed', 0)} 个文件")
+                        standard_client.disconnect()
+                    else:
+                        print("错误: 无法连接到服务器")
+                        sys.exit(1)
+                    
+            elif args.action == "git-init":
+                remote_path = args.remote_path if hasattr(args, 'remote_path') and args.remote_path else None
+                success = client.init(force=args.force if hasattr(args, 'force') else False, remote_path=remote_path)
+                if not success:
+                    print("Git初始化失败，尝试使用标准API创建远程目录")
+                    # 回退到块级同步API创建目录
+                    standard_client = SimplifiedMCPClient(args.server, args.workspace, use_delta_sync=True)
+                    connect_result = standard_client.connect()
+                    if connect_result:
+                        # 尝试创建远程目录
+                        path = remote_path if remote_path else os.path.basename(args.workspace)
+                        print(f"尝试创建远程目录: {path}")
+                        
+                        # 使用list API检查目录是否存在
+                        files = standard_client.list_files(os.path.dirname(path))
+                        directory_exists = False
+                        for item in files:
+                            if item["type"] == "directory" and item["path"] == path:
+                                directory_exists = True
+                                break
+                        
+                        if directory_exists:
+                            print(f"远程目录已存在: {path}")
+                            sys.exit(0)
+                        else:
+                            # 目录不存在，创建一个空文件夹标识文件
+                            folder_marker = f"{path}/.folder"
+                            result = standard_client.update_file_content(folder_marker, b"")
+                            if result:
+                                print(f"已创建远程目录标识: {path}")
+                                sys.exit(0)
+                            else:
+                                print(f"无法创建远程目录标识: {path}")
+                                sys.exit(1)
+                    else:
+                        print("错误: 无法连接到服务器")
+                        sys.exit(1)
+                    
+            elif args.action == "git-status":
+                success = client.status(verbose=args.verbose if hasattr(args, 'verbose') else False)
+                if not success:
+                    sys.exit(1)
+            elif args.action == "git-resolve":
+                success = client.resolve(strategy=args.strategy if hasattr(args, 'strategy') else "interactive")
+                if not success:
+                    sys.exit(1)
+            else:
+                print("使用Git同步模式时，只支持sync、git-init、git-status和git-resolve命令")
+                sys.exit(1)
+        except Exception as e:
+            print(f"执行Git同步操作时出错: {str(e)}")
+            print("尝试使用块级同步API替代...")
+            # 回退到块级同步
+            use_git_sync = False
+            
+        if not use_git_sync:
+            # 如果已成功执行Git同步操作，则退出
+            sys.exit(0)
+    
+    # 创建普通客户端实例
     use_delta_sync = not args.no_delta
     client = SimplifiedMCPClient(args.server, args.workspace, use_delta_sync)
     connect_result = client.connect()

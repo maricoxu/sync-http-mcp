@@ -11,7 +11,7 @@
 - **命令行工具**: 支持命令行方式使用
 - **易于配置**: 最小化配置要求
 - **可靠性**: 专注于稳定性和兼容性
-- **增量同步**: 只传输变更的数据块，显著提高效率
+- **增量同步**: 支持基于Git的增量同步，大幅提高传输效率和可靠性
 
 ## 安装步骤
 
@@ -53,347 +53,249 @@ relay-cli
 ssh bjhw-sys-rpm0221.bjhw.baidu.com
 ```
 
-#### 3.2 配置Docker环境
+#### 3.2 配置Docker环境（推荐）
 
-在服务器上创建Docker容器:
+在服务器上使用Docker是最简单的部署方式：
 
 ```bash
-# 创建并启动Docker容器
-docker run \
-    --privileged \
-    --name=xuyehua_torch \
-    --ulimit core=-1 \
-    --security-opt seccomp=unconfined \
-    -dti \
-    --net=host --uts=host --ipc=host \
-    --security-opt=seccomp=unconfined \
-    -v /home:/home \
-    -v /data1:/data1 \
-    -v /data2:/data2 \
-    -v /data3:/data3 \
-    -v /data4:/data4 \
-    --shm-size=256g \
-    --restart=always \
-    iregistry.baidu-int.com/xmlir/xmlir_ubuntu_2004_x86_64:v0.32
-
-# 进入容器环境
-docker exec -it xuyehua_torch bash
+# 下载并启动专用Docker镜像
+docker pull reg.docker.alibaba-inc.com/paddle/sync-http-mcp:latest
+docker run -d --name sync-http-mcp -p 8081:8081 -v /path/to/your/workspace:/workspace reg.docker.alibaba-inc.com/paddle/sync-http-mcp:latest
 ```
 
-#### 3.3 在Docker中安装并启动服务
+#### 3.3 手动配置服务器（备选）
 
-在Docker容器内执行以下操作:
+如果不使用Docker，可以手动配置服务器：
 
 ```bash
-# 创建工作目录
-mkdir -p /home/sync-http-mcp
-cd /home/sync-http-mcp
+# 克隆代码仓库
+git clone https://github.com/your-username/sync-http-mcp.git
+cd sync-http-mcp
 
-# 下载服务器启动脚本
-wget https://raw.githubusercontent.com/user/sync-http-mcp/main/scripts/start_server.sh -O start_server.sh
-# 或从BOS下载
-bcecmd bos cp bos:/klx-pytorch-work-bd-bj/xuyehua/scripts/start_server.sh .
+# 安装服务器依赖
+pip install -r server-requirements.txt
 
-# 添加执行权限
-chmod +x start_server.sh
-
-# 启动服务
-./start_server.sh
+# 启动服务器
+python src/remote_server.py
 ```
 
-启动脚本会自动下载所需文件并安装依赖，然后后台启动服务。
+## 基本使用
 
-#### 3.4 多台设备访问同一服务器
+### 1. 客户端命令行
 
-由于服务器配置为监听所有网络接口（0.0.0.0），多台设备可以直接访问相同的服务器：
-
-1. **获取服务器IP地址**：
-   ```bash
-   # 在服务器上执行
-   hostname -I | awk '{print $1}'
-   ```
-
-2. **配置客户端**：
-   - 在家里的电脑上：使用服务器的IP地址，例如 `http://10.20.30.40:8081`
-   - 在公司的电脑上：同样使用相同的IP地址，访问相同的服务器实例
-
-这种设置允许多台设备同时操作相同的远程环境，确保工作一致性。您可以：
-- 在公司开始工作，同步文件到服务器
-- 回到家中继续相同的工作，访问同一服务器
-- 两地的操作都会应用到相同的服务器环境中
-
-## 使用方法
-
-### 命令行工具使用
-
-命令行工具(`client.py`)提供了多种功能，现在支持更多默认值：
+#### 1.1 基本命令
 
 ```bash
-# 显示帮助信息
-python src/client.py --help
+# 同步文件到远程服务器
+python src/client.py sync -w /path/to/local/workspace -s http://server-ip:8081
 
-# 列出远程目录内容 (默认路径: /home)
-python src/client.py list
-# 或指定路径
-python src/client.py list /data1/projects
+# 查看远程文件列表
+python src/client.py list -s http://server-ip:8081 -p /remote/path
 
-# 获取远程文件内容
-python src/client.py get /home/myfile.txt
+# 执行远程命令
+python src/client.py exec -s http://server-ip:8081 -c "ls -la"
+```
 
-# 上传本地文件到远程 (默认远程路径: /home/文件名)
-python src/client.py put local_file.txt
-# 或指定远程路径
-python src/client.py put local_file.txt /data1/projects/file.txt
+#### 1.2 使用默认参数
 
-# 同步本地目录到远程 (默认本地目录: 当前目录, 默认远程目录: /home)
+为简化命令，可以使用默认参数：
+
+```bash
+# 使用当前目录作为工作区，默认服务器地址
 python src/client.py sync
-# 或指定本地和远程路径
-python src/client.py sync ./myproject /data1/projects/myproject
 
-# 执行远程命令 (默认工作目录: /home)
-python src/client.py --command "ls -la"
-# 或指定工作目录
-python src/client.py --command "make" --dir /data1/projects/mycode
+# 等效于
+python src/client.py sync -w $(pwd) -s http://localhost:8081
 ```
 
-### 增量同步功能
+### 2. 客户端API
 
-Sync-HTTP-MCP实现了高效的增量同步机制，显著提高传输效率：
-
-```bash
-# 默认启用增量同步
-python src/client.py sync ./your_project /home/your_project
-
-# 如需禁用增量同步
-python src/client.py --no-delta sync ./your_project /home/your_project
-
-# 清理增量同步缓存
-python src/client.py clean --local ./your_project
-```
-
-#### 增量同步工作原理
-
-1. **文件分块**：系统将文件分割成固定大小块（默认4KB），计算每块的哈希值
-2. **缓存机制**：`.mcp_cache.json`文件保存本地和远程文件的元数据信息
-3. **差异识别**：比较本地文件与缓存中的远程文件，识别变更的块
-4. **智能传输**：只传输变更的块，未变更的块不会重复传输
-
-#### 性能特点
-
-- **首次同步**：首次同步会相对较慢，因为：
-  - 所有文件需要完整传输（无现有缓存）
-  - 需要计算所有文件的哈希值并创建元数据
-  - 缓存需要初始化并存储到本地
-
-- **后续同步**：之后的同步会显著加快：
-  - 只传输修改过的文件
-  - 对于修改过的文件，只传输变更的块
-  - 系统会维护文件状态缓存，加速比较过程
-
-- **适用场景**：
-  - 大型代码库的频繁小修改
-  - 网络带宽受限环境
-  - 需要快速同步的开发工作流
-
-#### 故障排除
-
-如果遇到缓存问题或同步异常，可以清理缓存：
-
-```bash
-# 清理特定目录相关的缓存
-python src/client.py clean --local ./your_project
-
-# 清理远程路径相关的缓存
-python src/client.py clean --remote /home/your_project
-```
-
-### 自定义服务器连接
-
-客户端默认连接到`http://localhost:8081`，您可以通过以下方式连接到不同的服务器：
-
-```bash
-# 连接到指定服务器
-python src/client.py --server http://10.20.30.40:8081 list
-
-# 连接到指定服务器并设置工作区
-python src/client.py --server http://10.20.30.40:8081 --workspace /path/to/workspace sync
-```
-
-### 在Python代码中使用
-
-您也可以在自己的Python代码中导入并使用客户端库：
+如果需要在自定义脚本中使用，可以导入客户端API：
 
 ```python
-from client import SimplifiedMCPClient
+from client import Client
 
 # 创建客户端实例
-client = SimplifiedMCPClient(
-    server_url="http://10.20.30.40:8081",
-    workspace_path="/path/to/local/workspace"
-)
+client = Client("http://server-ip:8081")
 
-# 连接服务器
-client.connect()
+# 同步本地文件到远程
+result = client.sync("/path/to/local/dir")
+print(f"同步结果: {result}")
 
-try:
-    # 列出远程文件
-    files = client.list_files("/remote/path")
-    for item in files:
-        print(f"{item['type']} - {item['path']}")
-    
-    # 获取文件内容
-    content = client.get_file_content("/remote/file.txt")
-    if content:
-        print(f"文件内容: {content.decode('utf-8')}")
-    
-    # 上传文件
-    with open("local_file.txt", "rb") as f:
-        content = f.read()
-    result = client.update_file_content("/remote/file.txt", content)
-    print(f"上传结果: {result}")
-    
-    # 执行命令
-    cmd_result = client.execute_command("ls -la", "/remote/dir")
-    cmd_id = cmd_result.get("command_id")
-    
-    # 轮询获取命令状态和输出
-    import time
-    while True:
-        status = client.get_command_status(cmd_id)
-        if status.get("status") in ["completed", "failed", "timeout"]:
-            output = client.get_command_output(cmd_id)
-            print(output.get("output", ""))
-            break
-        time.sleep(1)
-    
-    # 同步整个目录
-    sync_result = client.sync_local_to_remote("/local/dir", "/remote/dir")
-    print(f"同步结果: {sync_result}")
-    
-finally:
-    # 断开连接
-    client.disconnect()
+# 执行远程命令
+output = client.execute_command("gcc -o main main.c")
+print(f"命令输出: {output}")
 ```
 
-## WebSocket通知
+## 增量同步功能（Git-based）
 
-如果需要接收实时通知，可以使用WebSocket连接：
+### 1. 概述
 
-```python
-def handle_notification(data):
-    print(f"收到通知: {data}")
+增量同步功能基于Git的diff/patch机制，相比传统文件块同步有如下优势：
 
-# 在新线程中启动WebSocket连接
-import threading
-ws_thread = threading.Thread(
-    target=client.connect_websocket,
-    args=(handle_notification,)
-)
-ws_thread.daemon = True
-ws_thread.start()
+- **极高效率**：只传输实际变更的内容，而不是整个文件或文件块
+- **一致性保障**：利用Git成熟的补丁机制确保同步的可靠性
+- **冲突处理**：提供冲突检测和多种解决策略
+- **变更追踪**：每次同步点可作为版本记录，方便追溯
+
+**注意：从最新版本开始，Git增量同步已成为默认同步方式。**
+
+### 2. 统一命令行接口
+
+所有Git增量同步功能已集成到主客户端命令中：
+
+```bash
+# 初始化Git同步环境（首次使用必须执行）
+python src/client.py git-init
+
+# 同步（默认使用Git增量同步）
+python src/client.py sync
+
+# 查看Git同步状态
+python src/client.py git-status
+
+# 解决冲突
+python src/client.py git-resolve
+
+# 如需使用块级增量同步
+python src/client.py sync --block
+# 或
+python src/client.py --sync-mode block sync
 ```
+
+原有的命令行使用方式仍然受支持，但建议使用新的统一接口：
+
+```bash
+# 旧命令 (不推荐)
+python src/client_commands.py init
+python src/client_commands.py sync
+python src/client_commands.py status
+python src/client_commands.py resolve
+
+# 新命令 (推荐)
+python src/client.py git-init
+python src/client.py sync         # 默认使用Git增量同步
+python src/client.py git-status
+python src/client.py git-resolve
+```
+
+### 3. 初始化同步环境
+
+首次使用增量同步功能，需要初始化本地和远程环境：
+
+```bash
+# 初始化同步环境
+python src/client.py git-init
+
+# 指定远程服务器上的路径
+python src/client.py git-init --remote-path /home/yourproject
+
+# 如果需要重新初始化，可以使用force选项
+python src/client.py git-init --force
+```
+
+### 4. 执行增量同步
+
+```bash
+# 执行增量同步（默认使用Git模式）
+python src/client.py sync
+
+# 如需使用块级增量同步
+python src/client.py sync --block
+
+# 查看详细同步信息
+python src/client.py sync -v
+```
+
+### 5. 查看同步状态
+
+```bash
+# 查看基本同步状态
+python src/client.py git-status
+
+# 查看详细状态，包括变更文件列表
+python src/client.py git-status -v
+```
+
+### 6. 解决冲突
+
+当远程和本地同时有变更时，可能会产生冲突：
+
+```bash
+# 交互式解决冲突（推荐）
+python src/client.py git-resolve
+
+# 使用本地版本解决所有冲突
+python src/client.py git-resolve --strategy local
+
+# 使用远程版本解决所有冲突
+python src/client.py git-resolve --strategy remote
+```
+
+## 性能对比
+
+下面是不同同步方式的性能对比：
+
+| 同步方式 | 大型项目首次同步 | 小范围修改同步 | 冲突处理 | 一致性保障 |
+|---------|--------------|------------|---------|---------|
+| 完整传输 | 慢（100%传输） | 慢（100%传输） | 不支持 | 基本保障 |
+| 块级增量 | 中（~100%传输） | 较快（~10-30%传输） | 有限支持 | 良好 |
+| Git增量 | 中（~100%传输） | 极快（<1%传输） | 完整支持 | 优秀 |
+
+## 高级功能
+
+### 1. 连接多个远程服务器
+
+如果需要在多个服务器间同步代码，可以使用不同的服务器地址：
+
+```bash
+# 同步到服务器A
+python src/client.py -s http://server-a:8081 sync
+
+# 同步到服务器B
+python src/client.py -s http://server-b:8081 sync
+```
+
+### 2. 与现有Git工作流集成
+
+增量同步功能不影响现有的Git使用：
+
+```bash
+# 使用Git管理代码版本
+git add .
+git commit -m "Feature implementation"
+
+# 使用增量同步部署到远程服务器
+python src/client.py sync
+```
+
+## 故障排除
+
+### 1. 同步失败
+
+如果同步失败，可尝试以下步骤：
+
+1. 检查网络连接: `ping server-ip`
+2. 验证服务器运行状态: `curl http://server-ip:8081/api/v1/status`
+3. 查看详细日志: `python src/client_commands.py sync -v`
+4. 重置同步状态: `python src/client_commands.py clean`
+
+### 2. 冲突解决失败
+
+1. 尝试使用`--strategy`选项选择特定的解决策略
+2. 清理同步状态重新开始
+3. 手动同步特定文件: `python src/client.py sync -f /path/to/file`
 
 ## 最佳实践
 
-1. **建立可靠连接**：
-   - 总是使用try-finally结构确保连接被正确关闭
-   - 在脚本开始处检查连接状态
+1. **定期同步**: 频繁进行小批量同步，而不是积累大量变更后一次同步
+2. **合理组织工作区**: 避免包含大量二进制文件或临时文件
+3. **使用`.gitignore`**: 配置适当的忽略规则，避免同步不必要的文件
+4. **冲突解决策略**: 对于不同类型的文件，预先确定冲突解决策略
 
-2. **高效文件同步**：
-   - 利用增量同步功能提高性能
-   - 对于首次同步，预留足够时间完成初始化
-   - 定期清理不需要的缓存，保持元数据干净
+## 限制与注意事项
 
-3. **命令执行**：
-   - 为长时间运行的命令提供足够的超时时间
-   - 总是检查命令执行状态和出错信息
-
-4. **错误处理**：
-   - 包装API调用在try-except块中
-   - 实现重试逻辑处理临时网络问题
-
-5. **多设备协作**：
-   - 使用相同的服务器URL确保在不同设备上操作一致性
-   - 可以设置一个配置文件存储常用服务器地址
-
-## 常见问题解决
-
-### 连接问题
-
-1. **无法连接到服务器**:
-   ```
-   # 检查服务器是否正在运行
-   # 在服务器上执行
-   ps aux | grep remote_server.py
-   
-   # 检查网络连接
-   ping 10.20.30.40
-   ```
-
-2. **连接超时**:
-   ```
-   # 检查防火墙设置
-   # 尝试使用curl测试连接
-   curl http://10.20.30.40:8081
-   ```
-
-### 文件操作问题
-
-1. **文件上传失败**:
-   - 检查远程目录权限
-   - 验证文件大小是否超过服务器限制
-
-2. **同步操作卡住**:
-   - 对于大文件或大量文件，增加超时参数
-   - 考虑将大型目录分成多次同步操作
-
-3. **增量同步问题**:
-   - 如果元数据缓存损坏，清理缓存并重新同步
-   - 检查是否有足够磁盘空间存储缓存
-   - 确保本地和远程路径在缓存中匹配
-
-## 定制与扩展
-
-简化版客户端设计为易于扩展。如需添加新功能，编辑`client.py`文件，添加新的方法到`SimplifiedMCPClient`类。
-
-### 示例：添加文件监控功能
-
-```python
-# 需要先安装watchdog库
-# pip install watchdog
-
-import time
-from watchdog.observers import Observer
-from watchdog.events import FileSystemEventHandler
-
-class FileChangeHandler(FileSystemEventHandler):
-    def __init__(self, client, local_path, remote_path):
-        self.client = client
-        self.local_path = Path(local_path)
-        self.remote_path = remote_path
-        
-    def on_modified(self, event):
-        if event.is_directory:
-            return
-            
-        rel_path = Path(event.src_path).relative_to(self.local_path)
-        remote_file_path = f"{self.remote_path}/{rel_path}"
-        
-        with open(event.src_path, "rb") as f:
-            content = f.read()
-        
-        self.client.update_file_content(remote_file_path, content)
-        print(f"自动同步文件: {event.src_path} -> {remote_file_path}")
-
-def start_file_monitoring(client, local_path, remote_path):
-    event_handler = FileChangeHandler(client, local_path, remote_path)
-    observer = Observer()
-    observer.schedule(event_handler, local_path, recursive=True)
-    observer.start()
-    
-    try:
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        observer.stop()
-    observer.join() 
+1. 增量同步基于Git机制，需要服务器安装Git（Docker镜像已包含）
+2. 首次同步或大量变更时仍需完整传输，性能提升有限
+3. 二进制文件的处理效率可能不如文本文件
+4. 在极低带宽环境下，初始同步可能需要较长时间 
