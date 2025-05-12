@@ -40,7 +40,7 @@ pip install -i https://pypi.tuna.tsinghua.edu.cn/simple requests>=2.25.0 websock
 ```bash
 # 登录到内网服务器
 relay-cli
-ssh bjhw-sys-rpm0221.bjhw.baidu.com
+ssh ${yourserver}
 
 # 或使用webrelay登录
 
@@ -87,16 +87,16 @@ chmod +x start_server.sh
 
 ```bash
 # 列出远程目录内容 (默认: /home)
-python src/client.py list
+python3 src/client.py list
 
 # 同步本地目录到远程 (默认: 当前目录 -> /home)
-python src/client.py sync
+python3 src/client.py sync
 
 # 上传本地文件 (默认远程路径: /home/文件名)
-python src/client.py put local_file.txt
+python3 src/client.py put local_file.txt
 
 # 执行远程命令 (默认目录: /home)
-python src/client.py --command "ls -la"
+python3 src/client.py --command "ls -la"
 ```
 
 ### 4. 多设备协作
