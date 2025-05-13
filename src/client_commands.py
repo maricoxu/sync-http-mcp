@@ -42,7 +42,7 @@ class GitSyncClient:
         self.workspace = Path(workspace).resolve()
         self.server_url = server_url
         self.sync_manager = GitSyncManager(workspace, server_url)
-        self.client = client.Client(server_url, workspace)
+        self.client = client.Client(server_url, workspace, use_delta_sync=False)
         
     def init(self, force: bool = False, remote_path: str = None) -> bool:
         """

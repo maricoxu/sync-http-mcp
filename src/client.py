@@ -933,3 +933,6 @@ def main():
 
 if __name__ == "__main__":
     main() 
+
+# 为兼容性添加Client类别名
+Client = SimplifiedMCPClient
