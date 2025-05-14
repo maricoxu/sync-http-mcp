@@ -30,6 +30,13 @@ try:
 except ImportError:
     GIT_AVAILABLE = False
 
+# 尝试导入Git文件状态管理
+try:
+    from git_file_state import GitStateManager, GitFileState
+    GIT_STATE_AVAILABLE = True
+except ImportError:
+    GIT_STATE_AVAILABLE = False
+
 import aiofiles
 import uvicorn
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, BackgroundTasks
@@ -63,8 +70,13 @@ app.add_middleware(
 # 程序配置
 SERVER_CONFIG = {
     "test_mode": False,  # 是否为本地测试模式
-    "test_root_dir": str(Path.home() / "mcp_test_root")  # 测试模式下的虚拟根目录，默认为用户主目录下的mcp_test_root
+    "test_root_dir": str(Path.home() / "mcp_test_root"),  # 测试模式下的虚拟根目录，默认为用户主目录下的mcp_test_root
+    "cache_dir": "~/.mcp_cache",  # Git状态缓存目录
+    "git_cache_enabled": True,  # 是否启用Git状态缓存
 }
+
+# 全局状态管理
+GIT_STATE_MANAGERS = {}  # 路径 -> GitStateManager 实例
 
 # 通用路径映射函数
 def map_remote_path(path: str) -> str:
@@ -246,199 +258,291 @@ def init_git_repo(path: str, force: bool = False) -> Dict[str, Any]:
         force: 是否强制初始化（如果已存在）
         
     Returns:
-        操作结果字典
+        操作结果信息
     """
-    if not GIT_AVAILABLE:
-        return {"status": "error", "message": "Git功能不可用，请安装GitPython库"}
-    
     # 路径映射
     path = map_remote_path(path)
-    
     repo_path = Path(path)
     
-    # 确保目录存在
+    # 检查Git是否可用
+    if not GIT_AVAILABLE:
+        return {
+            "status": "error",
+            "message": "Git功能不可用，请安装GitPython库"
+        }
+    
     try:
+        # 检查目录是否存在，不存在则创建
         repo_path.mkdir(parents=True, exist_ok=True)
-    except PermissionError as e:
-        return {"status": "error", "message": f"权限错误: 无法创建目录 {repo_path}"}
-    except FileNotFoundError as e:
-        return {"status": "error", "message": f"路径错误: 无法创建目录 {repo_path}"}
-    
-    git_dir = repo_path / ".git"
-    
-    try:
-        if git_dir.exists() and not force:
-            # 检查是否为有效的Git仓库
-            try:
-                repo = Repo(repo_path)
-                if not repo.bare:
-                    # 仓库已存在且有效
-                    last_commit = None
-                    if len(repo.heads) > 0:
-                        last_commit = str(repo.head.commit)
-                    
-                    git_sync_info[str(repo_path)] = {
-                        "repo": repo,
-                        "last_sync": time.time(),
-                        "last_commit": last_commit
-                    }
-                    
-                    return {
-                        "status": "success", 
-                        "message": "仓库已存在", 
-                        "path": str(repo_path),
-                        "last_commit": last_commit
-                    }
-                else:
-                    return {"status": "error", "message": "目标路径是一个裸仓库"}
-            except GitCommandError:
-                if force:
-                    # 无效的仓库，但允许强制重新初始化
-                    logger.warning(f"强制删除无效的Git仓库: {repo_path}")
-                    shutil.rmtree(git_dir)
-                else:
-                    return {"status": "error", "message": "目标路径中存在无效的Git仓库"}
+        
+        # 检查是否已经是Git仓库
+        if (repo_path / ".git").exists() and not force:
+            # 获取状态管理器
+            if GIT_STATE_AVAILABLE:
+                state_manager = get_or_create_state_manager(str(repo_path))
+                if state_manager:
+                    # 扫描目录更新状态
+                    state_manager.scan_directory()
+                    state_manager.update_sync_timestamp()
+                    state_manager.save_cache()
+            
+            # 获取当前HEAD提交
+            repo = Repo(repo_path)
+            current_head = repo.head.commit.hexsha
+            
+            # 记录同步信息
+            sync_info = {
+                "path": str(repo_path),
+                "last_commit": current_head,
+                "last_sync": time.time()
+            }
+            
+            return {
+                "status": "success",
+                "message": "Git仓库已存在",
+                "is_new": False,
+                "path": str(repo_path),
+                "head_commit": current_head,
+                "sync_info": sync_info
+            }
+        
+        # 如果强制初始化且目录存在，清理目录
+        if force and (repo_path / ".git").exists():
+            shutil.rmtree(repo_path / ".git")
         
         # 初始化新仓库
         repo = Repo.init(repo_path)
         
-        # 创建初始提交以建立主分支
+        # 设置用户信息（如果不存在）
+        config = repo.config_reader()
+        try:
+            username = config.get_value("user", "name")
+            email = config.get_value("user", "email")
+        except (KeyError, AttributeError):
+            config_writer = repo.config_writer()
+            config_writer.set_value("user", "name", "Sync-HTTP-MCP")
+            config_writer.set_value("user", "email", "sync-mcp@example.com")
+            username = "Sync-HTTP-MCP"
+            email = "sync-mcp@example.com"
+            config_writer.release()
+        
         # 创建.gitignore文件
         gitignore_path = repo_path / ".gitignore"
-        gitignore_content = """
-# 默认忽略规则
+        if not gitignore_path.exists() or force:
+            gitignore_content = """# Sync-HTTP-MCP generated .gitignore
 .DS_Store
 __pycache__/
 *.py[cod]
 *$py.class
-*.so
-.Python
 .env
 .venv
 env/
 venv/
 ENV/
-*.log
-"""
-        with open(gitignore_path, 'w') as f:
-            f.write(gitignore_content)
+.idea/
+.vscode/
+*.swp
+*.swo
+.mcp_cache.json
+            """
+            with open(gitignore_path, "w") as f:
+                f.write(gitignore_content)
         
-        # 创建README.md文件
-        readme_path = repo_path / "README.md"
-        with open(readme_path, 'w') as f:
-            f.write(f"# 同步目录: {repo_path.name}\n\n这个目录由Sync-HTTP-MCP管理，用于远程代码同步。")
+        # 创建初始提交
+        repo.git.add(all=True)
+        repo.git.commit("-m", "Initial commit by Sync-HTTP-MCP")
         
-        # 添加并提交文件
-        repo.git.add(".gitignore", "README.md")
-        commit = repo.index.commit("初始化同步仓库")
+        # 获取当前HEAD提交
+        current_head = repo.head.commit.hexsha
         
-        # 保存仓库信息
-        git_sync_info[str(repo_path)] = {
-            "repo": repo,
-            "last_sync": time.time(),
-            "last_commit": str(commit)
+        # 记录同步信息
+        sync_info = {
+            "path": str(repo_path),
+            "last_commit": current_head,
+            "last_sync": time.time()
         }
+        
+        # 创建并初始化状态管理器
+        if GIT_STATE_AVAILABLE:
+            state_manager = get_or_create_state_manager(str(repo_path))
+            if state_manager:
+                # 扫描目录生成初始状态
+                state_manager.scan_directory()
+                state_manager.update_sync_timestamp()
+                state_manager.save_cache()
         
         return {
-            "status": "success", 
-            "message": "仓库已初始化", 
+            "status": "success",
+            "message": "Git仓库初始化成功",
+            "is_new": True,
             "path": str(repo_path),
-            "last_commit": str(commit)
+            "head_commit": current_head,
+            "sync_info": sync_info
         }
-        
+    
     except Exception as e:
         logger.error(f"初始化Git仓库失败: {str(e)}")
-        return {"status": "error", "message": f"初始化Git仓库失败: {str(e)}"}
+        import traceback
+        traceback.print_exc()
+        return {
+            "status": "error",
+            "message": f"初始化Git仓库失败: {str(e)}"
+        }
 
 
 def apply_git_patch(path: str, patch_content: str, binary_files: List[Dict[str, str]] = [], 
                     base_commit: Optional[str] = None) -> Dict[str, Any]:
     """
-    应用Git补丁
+    应用Git补丁到仓库
     
     Args:
         path: 仓库路径
-        patch_content: 补丁内容
+        patch_content: 补丁内容（base64编码）
         binary_files: 二进制文件列表
-        base_commit: 基准提交哈希
+        base_commit: 基础提交
         
     Returns:
-        操作结果字典
+        操作结果信息
     """
-    if not GIT_AVAILABLE:
-        return {"status": "error", "message": "Git功能不可用，请安装GitPython库"}
-    
     # 路径映射
     path = map_remote_path(path)
-    
     repo_path = Path(path)
     
-    if not (repo_path / ".git").exists():
-        return {"status": "error", "message": "目标路径不是Git仓库"}
+    # 检查Git是否可用
+    if not GIT_AVAILABLE:
+        return {
+            "status": "error",
+            "message": "Git功能不可用，请安装GitPython库"
+        }
+    
+    # 检查路径是否存在且是Git仓库
+    if not repo_path.exists() or not (repo_path / ".git").exists():
+        return {
+            "status": "error",
+            "message": f"目标路径不是有效的Git仓库: {repo_path}"
+        }
     
     try:
-        repo = Repo(repo_path)
-        
-        # 验证base_commit是否存在
-        if base_commit:
-            try:
-                repo.git.rev_parse(base_commit)
-            except GitCommandError:
-                return {"status": "error", "message": f"基准提交不存在: {base_commit}"}
-        
-        # 首先应用二进制文件
-        for binary_file in binary_files:
-            file_path = repo_path / binary_file["path"].lstrip('/')
-            file_path.parent.mkdir(parents=True, exist_ok=True)
-            
-            content = base64.b64decode(binary_file["content"])
-            with open(file_path, 'wb') as f:
-                f.write(content)
-            
-            # 添加到索引
-            repo.git.add(str(file_path))
-        
-        # 应用补丁
-        patch_result = apply_patch(repo, patch_content)
-        
-        if not patch_result["success"]:
-            if patch_result.get("conflict_files"):
-                # 记录冲突文件
-                conflict_files[str(repo_path)] = patch_result["conflict_files"]
-                
-                # 返回冲突信息
-                return {
-                    "status": "conflict",
-                    "message": "应用补丁时发生冲突",
-                    "conflicts": [{"path": cf.path} for cf in patch_result["conflict_files"]]
-                }
-            else:
-                return {"status": "error", "message": patch_result.get("message", "应用补丁失败")}
-        
-        # 创建提交
-        commit_message = "从客户端同步变更"
-        commit = repo.index.commit(commit_message)
-        
-        # 更新同步信息
-        if str(repo_path) in git_sync_info:
-            git_sync_info[str(repo_path)]["last_sync"] = time.time()
-            git_sync_info[str(repo_path)]["last_commit"] = str(commit)
-        else:
-            git_sync_info[str(repo_path)] = {
-                "repo": repo,
-                "last_sync": time.time(),
-                "last_commit": str(commit)
+        # 解码补丁内容
+        try:
+            patch_bytes = base64.b64decode(patch_content)
+            patch_text = patch_bytes.decode('utf-8')
+        except Exception as e:
+            return {
+                "status": "error",
+                "message": f"补丁解码失败: {str(e)}"
             }
         
-        return {
-            "status": "success",
-            "message": "补丁已应用",
-            "new_commit": str(commit)
-        }
+        # 处理二进制文件
+        for binary_file in binary_files:
+            file_path = binary_file.get("path")
+            content = binary_file.get("content")
+            
+            if not file_path or not content:
+                continue
+            
+            # 解码内容
+            try:
+                file_content = base64.b64decode(content)
+            except Exception as e:
+                logger.error(f"二进制文件解码失败: {file_path} - {str(e)}")
+                continue
+            
+            # 确保目录存在
+            full_path = repo_path / file_path
+            full_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            # 写入文件
+            with open(full_path, "wb") as f:
+                f.write(file_content)
         
+        # 创建临时补丁文件
+        with tempfile.NamedTemporaryFile(suffix='.patch', delete=False, mode='w') as patch_file:
+            patch_file.write(patch_text)
+            patch_path = patch_file.name
+        
+        try:
+            # 应用补丁
+            repo = Repo(repo_path)
+            
+            # 如果指定了base_commit，先检查
+            if base_commit:
+                try:
+                    # 检查base_commit是否存在
+                    repo.git.cat_file('-e', base_commit)
+                    
+                    # 检查是否有本地未提交变更
+                    if repo.is_dirty():
+                        # 获取当前工作目录和索引的变更状态
+                        status = repo.git.status('--porcelain')
+                        if status.strip():
+                            logger.warning(f"仓库有未提交变更，尝试自动提交: {status}")
+                            repo.git.add(all=True)
+                            repo.git.commit('-m', 'Auto-commit before applying patch')
+                except GitCommandError:
+                    # base_commit不存在，返回错误
+                    return {
+                        "status": "error",
+                        "message": f"基础提交不存在: {base_commit}"
+                    }
+            
+            # 尝试应用补丁
+            result = apply_patch(repo, patch_text)
+            
+            # 如果应用成功，提交更改，否则返回冲突信息
+            if result["status"] == "success":
+                # 添加所有变更
+                repo.git.add(all=True)
+                
+                # 提交变更
+                commit = repo.index.commit("Apply sync patch")
+                
+                # 获取受影响的文件
+                affected_files = extract_files_from_patch(patch_text)
+                
+                # 更新GitStateManager
+                if GIT_STATE_AVAILABLE:
+                    state_manager = get_or_create_state_manager(str(repo_path))
+                    if state_manager:
+                        # 重新扫描整个仓库以更新状态
+                        state_manager.scan_directory()
+                        
+                        # 额外更新补丁中明确提到的文件状态
+                        for file_path in affected_files:
+                            try:
+                                full_path = os.path.join(str(repo_path), file_path)
+                                state_manager.update_file_state(full_path)
+                            except Exception as e:
+                                logger.error(f"更新文件状态失败: {file_path} - {str(e)}")
+                        
+                        # 更新同步时间戳并保存缓存
+                        state_manager.update_sync_timestamp()
+                        state_manager.save_cache()
+                
+                # 返回结果
+                return {
+                    "status": "success",
+                    "message": "补丁应用成功",
+                    "commit": str(commit),
+                    "affected_files": affected_files
+                }
+            else:
+                # 补丁应用失败，返回冲突信息
+                return result
+        
+        finally:
+            # 删除临时补丁文件
+            if os.path.exists(patch_path):
+                os.unlink(patch_path)
+    
     except Exception as e:
         logger.error(f"应用Git补丁失败: {str(e)}")
-        return {"status": "error", "message": f"应用Git补丁失败: {str(e)}"}
+        import traceback
+        traceback.print_exc()
+        return {
+            "status": "error",
+            "message": f"应用Git补丁失败: {str(e)}"
+        }
 
 
 def apply_patch(repo, patch_content: str) -> Dict[str, Any]:
@@ -510,7 +614,7 @@ def apply_patch(repo, patch_content: str) -> Dict[str, Any]:
 
 def extract_files_from_patch(patch_content: str) -> List[str]:
     """
-    从补丁内容中提取文件名
+    从Git补丁中提取文件路径
     
     Args:
         patch_content: 补丁内容
@@ -519,15 +623,46 @@ def extract_files_from_patch(patch_content: str) -> List[str]:
         文件路径列表
     """
     files = []
-    lines = patch_content.splitlines()
     
-    for line in lines:
-        if line.startswith("diff --git "):
-            # 格式：diff --git a/path/to/file b/path/to/file
-            parts = line.split(" ")
-            if len(parts) >= 4:
-                b_path = parts[3][2:]  # 移除 "b/" 前缀
-                files.append(b_path)
+    try:
+        # 解析补丁内容
+        lines = patch_content.splitlines()
+        current_file = None
+        
+        for line in lines:
+            # 尝试识别文件头
+            if line.startswith('--- a/') or line.startswith('+++ b/'):
+                # 提取路径部分
+                file_path = line[6:].strip()
+                
+                # 忽略/dev/null（表示文件创建或删除）
+                if file_path != '/dev/null' and file_path not in files:
+                    files.append(file_path)
+            
+            # 识别二进制文件
+            elif line.startswith('Binary files '):
+                # 格式通常是 "Binary files a/path/to/file and b/path/to/file differ"
+                parts = line.split(' ')
+                if len(parts) > 2:
+                    a_file = parts[2]
+                    if a_file.startswith('a/'):
+                        file_path = a_file[2:]
+                        if file_path not in files:
+                            files.append(file_path)
+            
+            # 识别diff --git行，作为备选
+            elif line.startswith('diff --git '):
+                # 格式通常是 "diff --git a/path/to/file b/path/to/file"
+                parts = line.split(' ')
+                if len(parts) >= 4:
+                    a_file = parts[2]
+                    if a_file.startswith('a/'):
+                        file_path = a_file[2:]
+                        if file_path not in files:
+                            files.append(file_path)
+    
+    except Exception as e:
+        logger.error(f"从补丁提取文件失败: {str(e)}")
     
     return files
 
@@ -1417,294 +1552,151 @@ async def websocket_endpoint(websocket: WebSocket):
         manager.disconnect(websocket)
 
 
-<<<<<<< HEAD
-# Git同步API端点
-@app.post("/api/v1/sync/init")
-def init_sync_repo(git_init: GitInitRequest):
-    """初始化同步仓库"""
-    if not GIT_AVAILABLE:
-        raise HTTPException(status_code=400, detail="Git功能不可用，请安装GitPython库")
-    
-    result = init_git_repo(git_init.path, git_init.force)
-    
-    if result["status"] == "error":
-        raise HTTPException(status_code=400, detail=result["message"])
-    
-    return result
-
-
-@app.post("/api/v1/sync/patch")
-def apply_sync_patch(patch_request: GitPatchRequest):
-    """应用同步补丁"""
-    if not GIT_AVAILABLE:
-        raise HTTPException(status_code=400, detail="Git功能不可用，请安装GitPython库")
-    
-    # 识别仓库路径（通过Git信息缓存）
-    if not git_sync_info:
-        raise HTTPException(status_code=400, detail="没有已初始化的Git仓库")
-    
-    # 找到匹配base_commit的仓库
-    repo_path = None
-    for path, info in git_sync_info.items():
-        if info.get("last_commit") == patch_request.base_commit:
-            repo_path = path
-            break
-    
-    if not repo_path:
-        # 如果没有找到匹配的仓库，使用第一个仓库
-        repo_path = next(iter(git_sync_info.keys()))
-    
-    result = apply_git_patch(
-        repo_path, 
-        patch_request.patch_content, 
-        patch_request.binary_files, 
-        patch_request.base_commit
-    )
-    
-    if result["status"] == "error":
-        raise HTTPException(status_code=400, detail=result["message"])
-    
-    return result
-
-
-@app.get("/api/v1/sync/status")
-def get_sync_repo_status(path: Optional[str] = None):
-    """获取同步状态"""
-    if not GIT_AVAILABLE:
-        raise HTTPException(status_code=400, detail="Git功能不可用，请安装GitPython库")
-    
-    # 如果未指定路径，使用第一个仓库
-    if not path:
-        if not git_sync_info:
-            return {"status": "not_initialized", "message": "没有已初始化的Git仓库"}
-        path = next(iter(git_sync_info.keys()))
-    
-    # 路径映射
-    path = map_remote_path(path)
-    
-    result = get_sync_status(path)
-    
-    if result["status"] == "error":
-        raise HTTPException(status_code=400, detail=result["message"])
-    
-    return result
-
-
-@app.get("/api/v1/sync/conflicts")
-def get_sync_conflicts(path: Optional[str] = None):
-    """获取冲突信息"""
-    if not GIT_AVAILABLE:
-        raise HTTPException(status_code=400, detail="Git功能不可用，请安装GitPython库")
-    
-    # 如果未指定路径，使用第一个仓库
-    if not path:
-        if not git_sync_info:
-            return {"status": "not_initialized", "message": "没有已初始化的Git仓库"}
-        
-        # 查找有冲突的仓库
-        conflict_repo = None
-        for repo_path in git_sync_info:
-            if repo_path in conflict_files and conflict_files[repo_path]:
-                conflict_repo = repo_path
-                break
-        
-        if not conflict_repo:
-            # 如果没有找到有冲突的仓库，使用第一个仓库
-            path = next(iter(git_sync_info.keys()))
-        else:
-            path = conflict_repo
-    
-    # 路径映射
-    path = map_remote_path(path)
-    
-    result = get_conflicts(path)
-    
-    if result["status"] == "error":
-        raise HTTPException(status_code=400, detail=result["message"])
-    
-    return result
-
-
-@app.post("/api/v1/sync/resolve")
-def resolve_sync_conflicts(resolve_request: GitConflictResolutionRequest, path: Optional[str] = None):
-    """解决同步冲突"""
-    if not GIT_AVAILABLE:
-        raise HTTPException(status_code=400, detail="Git功能不可用，请安装GitPython库")
-    
-    # 如果未指定路径，使用第一个仓库
-    if not path:
-        if not git_sync_info:
-            raise HTTPException(status_code=400, detail="没有已初始化的Git仓库")
-        
-        # 查找有冲突的仓库
-        conflict_repo = None
-        for repo_path in git_sync_info:
-            if repo_path in conflict_files and conflict_files[repo_path]:
-                conflict_repo = repo_path
-                break
-        
-        if not conflict_repo:
-            raise HTTPException(status_code=400, detail="没有找到有冲突的仓库")
-        
-        path = conflict_repo
-    
-    # 路径映射
-    path = map_remote_path(path)
-    
-    result = resolve_conflicts(path, resolve_request.conflicts)
-    
-    if result["status"] == "error":
-        raise HTTPException(status_code=400, detail=result["message"])
-    
-    return result
-
-
-@app.post("/api/v1/sync/clean")
-def clean_sync_repo(path: Optional[str] = None, confirm: bool = False):
-    """清理同步状态"""
-    if not GIT_AVAILABLE:
-        raise HTTPException(status_code=400, detail="Git功能不可用，请安装GitPython库")
-    
-    if not confirm:
-        raise HTTPException(status_code=400, detail="必须确认清理操作")
-    
-    # 如果未指定路径，使用第一个仓库
-    if not path:
-        if not git_sync_info:
-            raise HTTPException(status_code=400, detail="没有已初始化的Git仓库")
-        path = next(iter(git_sync_info.keys()))
-    
-    # 路径映射
-    path = map_remote_path(path)
-    
-    repo_path = Path(path)
-    
-    if not (repo_path / ".git").exists():
-        raise HTTPException(status_code=400, detail="目标路径不是Git仓库")
-    
-    try:
-        # 清理冲突记录
-        if str(repo_path) in conflict_files:
-            conflict_files[str(repo_path)] = []
-        
-        # 重置仓库状态
-        repo = Repo(repo_path)
-        repo.git.reset("--hard", "HEAD")
-        repo.git.clean("-fd")
-        
-        # 更新同步信息
-        if str(repo_path) in git_sync_info:
-            git_sync_info[str(repo_path)]["last_sync"] = time.time()
-        
-        return {
-            "status": "success",
-            "message": "同步状态已清理"
-        }
-        
-    except Exception as e:
-        logger.error(f"清理同步状态失败: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"清理同步状态失败: {str(e)}")
-
-
-@app.post("/api/v1/files/mkdir")
-async def create_directory(request: dict):
-    """创建目录"""
-    if "path" not in request:
-        raise HTTPException(status_code=400, detail="缺少路径参数")
-    
-    path = request["path"]
-    
-    # 路径映射
-    path = map_remote_path(path)
-    
-    dir_path = Path(path)
-    
-    try:
-        dir_path.mkdir(parents=True, exist_ok=True)
-        return {"status": "success", "message": f"目录已创建: {dir_path}"}
-    except PermissionError:
-        logger.error(f"创建目录失败: 权限不足 {dir_path}")
-        raise HTTPException(status_code=403, detail=f"创建目录失败: 权限不足 {dir_path}")
-    except FileNotFoundError:
-        logger.error(f"创建目录失败: 路径不存在 {dir_path}")
-        raise HTTPException(status_code=404, detail=f"创建目录失败: 路径不存在 {dir_path}")
-    except Exception as e:
-        logger.error(f"创建目录失败: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"创建目录失败: {str(e)}")
-=======
 @app.on_event("startup")
 async def startup_event():
-    logger.info("Server startup")
-    await load_metadata_cache() # Load cache on startup
+    """服务器启动事件处理"""
+    # 初始化Git状态管理器
+    if SERVER_CONFIG["git_cache_enabled"] and GIT_STATE_AVAILABLE:
+        await load_git_state_cache()
+    
+    # 创建测试模式目录结构
+    if SERVER_CONFIG["test_mode"]:
+        os.makedirs(SERVER_CONFIG["test_root_dir"], exist_ok=True)
+        # 创建基本目录结构，例如 /home
+        os.makedirs(os.path.join(SERVER_CONFIG["test_root_dir"], "home"), exist_ok=True)
+        logger.info(f"已创建测试模式目录结构: {SERVER_CONFIG['test_root_dir']}")
+
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    logger.info("Server shutting down")
-    await save_metadata_cache() # Save cache on shutdown
+    """服务器关闭事件处理"""
+    # 保存Git状态缓存
+    if SERVER_CONFIG["git_cache_enabled"] and GIT_STATE_AVAILABLE:
+        await save_git_state_cache()
 
 
-async def load_metadata_cache():
-    """Load file metadata cache from file"""
-    global file_metadata_cache
-    if CACHE_FILE.exists():
-        try:
-            async with aiofiles.open(CACHE_FILE, 'r', encoding='utf-8') as f:
-                content = await f.read()
-                file_metadata_cache = json.loads(content)
-            logger.info(f"Metadata cache loaded from {CACHE_FILE}")
-        except Exception as e:
-            logger.error(f"Failed to load metadata cache from {CACHE_FILE}: {e}")
-            file_metadata_cache = {} # Reset cache on error
-    else:
-        logger.info(f"Metadata cache file not found: {CACHE_FILE}. Starting with empty cache.")
-        file_metadata_cache = {}
-
-async def save_metadata_cache():
-    """Save file metadata cache to file"""
-    global file_metadata_cache
+async def load_git_state_cache():
+    """加载Git状态缓存"""
+    if not GIT_STATE_AVAILABLE:
+        logger.warning("Git状态管理模块不可用，无法加载缓存")
+        return
+    
+    # 确保缓存目录存在
+    cache_dir = os.path.expanduser(SERVER_CONFIG["cache_dir"])
+    os.makedirs(cache_dir, exist_ok=True)
+    
+    # 尝试从缓存目录加载现有的状态管理器
     try:
-        # Ensure directory exists
-        CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        async with aiofiles.open(CACHE_FILE, 'w', encoding='utf-8') as f:
-            # Convert Pydantic models to dict before saving
-            cache_data_to_save = {k: v if isinstance(v, dict) else v.model_dump() for k, v in file_metadata_cache.items()}
-            await f.write(json.dumps(cache_data_to_save, indent=4))
-        logger.info(f"Metadata cache saved to {CACHE_FILE}")
+        cache_files = [f for f in os.listdir(cache_dir) if f.endswith('.json')]
+        for cache_file in cache_files:
+            # 从文件名提取路径信息
+            path_hash = cache_file.replace('.json', '')
+            
+            # 尝试从缓存文件加载
+            cache_path = os.path.join(cache_dir, cache_file)
+            
+            # 创建状态管理器并加载缓存
+            try:
+                # 从缓存JSON文件中提取原始路径
+                with open(cache_path, 'r') as f:
+                    cache_data = json.load(f)
+                    original_path = cache_data.get('base_dir', '')
+                
+                if original_path:
+                    # 创建状态管理器
+                    manager = GitStateManager(original_path, cache_path)
+                    if manager.load_cache():
+                        GIT_STATE_MANAGERS[original_path] = manager
+                        logger.info(f"已加载Git状态缓存: {original_path}")
+            except Exception as e:
+                logger.error(f"加载Git状态缓存失败: {cache_path} - {str(e)}")
     except Exception as e:
-        logger.error(f"Failed to save metadata cache to {CACHE_FILE}: {e}")
->>>>>>> f98f016 (修复增量同步失效问题)
+        logger.error(f"加载Git状态缓存目录失败: {cache_dir} - {str(e)}")
+
+
+async def save_git_state_cache():
+    """保存Git状态缓存"""
+    if not GIT_STATE_AVAILABLE:
+        return
+    
+    # 保存所有状态管理器的缓存
+    for path, manager in GIT_STATE_MANAGERS.items():
+        try:
+            if manager.save_cache():
+                logger.info(f"已保存Git状态缓存: {path}")
+            else:
+                logger.warning(f"保存Git状态缓存失败: {path}")
+        except Exception as e:
+            logger.error(f"保存Git状态缓存异常: {path} - {str(e)}")
+
+
+def get_or_create_state_manager(path: str) -> Optional[GitStateManager]:
+    """获取或创建Git状态管理器"""
+    if not GIT_STATE_AVAILABLE:
+        return None
+    
+    # 规范化路径
+    path = os.path.normpath(path)
+    
+    # 检查是否已存在
+    if path in GIT_STATE_MANAGERS:
+        return GIT_STATE_MANAGERS[path]
+    
+    # 创建新的状态管理器
+    if SERVER_CONFIG["git_cache_enabled"]:
+        # 为此路径创建缓存文件
+        cache_dir = os.path.expanduser(SERVER_CONFIG["cache_dir"])
+        os.makedirs(cache_dir, exist_ok=True)
+        
+        # 使用路径哈希作为缓存文件名
+        path_hash = hashlib.md5(path.encode()).hexdigest()
+        cache_path = os.path.join(cache_dir, f"{path_hash}.json")
+        
+        # 创建状态管理器
+        manager = GitStateManager(path, cache_path)
+        GIT_STATE_MANAGERS[path] = manager
+        return manager
+    else:
+        # 不启用缓存
+        manager = GitStateManager(path)
+        GIT_STATE_MANAGERS[path] = manager
+        return manager
 
 
 # 如果作为主程序运行
 if __name__ == "__main__":
-    # 从命令行获取参数
     import argparse
     
-    parser = argparse.ArgumentParser(description="Sync-HTTP-MCP Remote Server")
-    parser.add_argument("--port", type=int, default=8081, help="服务器端口")
-    parser.add_argument("--host", type=str, default="127.0.0.1", help="服务器主机地址")
-    parser.add_argument("--test-mode", action="store_true", help="启用测试模式，将创建虚拟路径结构")
-    parser.add_argument("--test-root", type=str, help="测试模式下的虚拟根目录，默认为用户主目录下的mcp_test_root")
+    parser = argparse.ArgumentParser(description="Sync-HTTP-MCP远程服务器")
+    parser.add_argument("--host", default="127.0.0.1", help="服务器主机地址 (默认: 127.0.0.1)")
+    parser.add_argument("--port", type=int, default=8081, help="服务器端口 (默认: 8081)")
+    parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+                      help="日志级别 (默认: INFO)")
+    parser.add_argument("--test-mode", action="store_true", help="启用测试模式，使用本地虚拟路径")
+    parser.add_argument("--test-root", help="测试模式根目录 (默认: ~/mcp_test_root)")
+    parser.add_argument("--cache-dir", help="Git状态缓存目录 (默认: ~/.mcp_cache)")
+    parser.add_argument("--disable-git-cache", action="store_true", help="禁用Git状态缓存")
     
     args = parser.parse_args()
     
-    # 设置测试模式
+    # 配置日志级别
+    logging.getLogger().setLevel(getattr(logging, args.log_level))
+    
+    # 更新程序配置
     if args.test_mode:
         SERVER_CONFIG["test_mode"] = True
-        logger.info("已启用测试模式")
-        
         if args.test_root:
             SERVER_CONFIG["test_root_dir"] = args.test_root
-        
-        # 确保测试根目录存在
-        test_root = Path(SERVER_CONFIG["test_root_dir"])
-        test_root.mkdir(parents=True, exist_ok=True)
-        
-        # 创建基本目录结构
-        home_dir = test_root / "home"
-        home_dir.mkdir(exist_ok=True)
-        
-        logger.info(f"测试模式根目录: {test_root}")
+        logger.info(f"已启用测试模式")
+        logger.info(f"测试模式根目录: {SERVER_CONFIG['test_root_dir']}")
+    
+    # 设置Git缓存配置
+    if args.cache_dir:
+        SERVER_CONFIG["cache_dir"] = args.cache_dir
+    
+    if args.disable_git_cache:
+        SERVER_CONFIG["git_cache_enabled"] = False
+        logger.info("已禁用Git状态缓存")
     
     # 启动服务器
     uvicorn.run(app, host=args.host, port=args.port)

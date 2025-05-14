@@ -1,6 +1,65 @@
 # Sync-HTTP-MCP
 
-基于HTTP的百度内部多云协同开发工具。
+基于HTTP的远程代码同步和命令执行系统，支持块级增量同步和Git增量同步。
+
+## 最新更新
+
+### Git状态管理系统集成
+
+现在已经完成了Git状态管理系统与服务器的集成，带来以下改进：
+
+- **高效状态追踪**: 使用GitStateManager跟踪文件状态变化
+- **持久化缓存**: 服务器端状态缓存持久化，重启后保持状态
+- **路径映射优化**: 改进路径映射以更好地支持测试和生产环境
+- **命令行控制**: 新增命令行选项控制Git缓存功能
+
+## 快速开始
+
+### 服务器启动
+
+```bash
+# 标准启动
+python src/remote_server.py --host 0.0.0.0 --port 8081
+
+# 带Git缓存配置的启动
+python src/remote_server.py --host 0.0.0.0 --port 8081 --cache-dir ~/.mcp_git_cache
+
+# 测试模式启动
+python src/remote_server.py --host 0.0.0.0 --port 8081 --test-mode
+```
+
+### 客户端使用
+
+```bash
+# 使用Git同步方式 (默认)
+python src/mcp_cli.py --server http://localhost:8081 --workspace ./local_dir sync
+
+# 使用块级同步方式 
+python src/mcp_cli.py --server http://localhost:8081 --workspace ./local_dir --block sync
+
+# 初始化Git同步环境
+python src/mcp_cli.py --server http://localhost:8081 --workspace ./local_dir git-init
+```
+
+## 新增命令行选项
+
+服务器端新增命令行选项：
+
+- `--cache-dir`: 设置Git状态缓存目录 (默认: ~/.mcp_cache)
+- `--disable-git-cache`: 禁用Git状态缓存功能
+- `--log-level`: 设置日志级别，可选值为DEBUG、INFO、WARNING、ERROR (默认: INFO)
+
+## 测试
+
+运行集成测试:
+
+```bash
+# 先启动服务器
+python src/remote_server.py --host 0.0.0.0 --port 8081 --test-mode
+
+# 运行测试
+python tests/test_git_integration.py
+```
 
 ## 功能特点
 
