@@ -50,7 +50,7 @@ webrelay
 
 # 或者使用传统登录方式
 relay-cli
-ssh bjhw-sys-rpm0221.bjhw.baidu.com
+ssh [hostname_or_ip]
 ```
 
 #### 3.2 配置Docker环境（推荐）

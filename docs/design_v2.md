@@ -266,24 +266,6 @@ pip install fastapi uvicorn websockets python-multipart
 python server.py --port 8081 --host 0.0.0.0
 ```
 
-### 5.2 端口转发设置
-
-用户需执行一次性设置：
-
-```bash
-# 连接跳板机
-relay-cli
-
-# 在跳板机上设置端口转发
-ssh -N -L 8081:localhost:8081 bjhw-sys-rpm0221.bjhw.baidu.com
-```
-
-也可使用自动脚本：
-
-```bash
-./setup-tunnel.sh bjhw-sys-rpm0221.bjhw.baidu.com 8081
-```
-
 ### 5.3 客户端配置
 
 在Cursor插件中配置:

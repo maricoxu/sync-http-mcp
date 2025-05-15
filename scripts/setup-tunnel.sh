@@ -2,7 +2,7 @@
 # 设置端口转发隧道的自动化脚本
 
 # 配置参数
-TARGET_SERVER=${1:-"bjhw-sys-rpm0221.bjhw.baidu.com"}
+TARGET_SERVER=${1:-"[default_hostname_or_ip]"}
 LOCAL_PORT=${2:-8081}
 REMOTE_PORT=${3:-$LOCAL_PORT}
 

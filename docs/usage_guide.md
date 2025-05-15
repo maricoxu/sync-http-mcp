@@ -28,7 +28,7 @@ Cursor IDE
 1. **登录内网服务器**
    ```bash
    relay-cli
-   ssh bjhw-sys-rpm0221.bjhw.baidu.com
+   ssh [hostname_or_ip]
    ```
 
 2. **下载项目代码**
@@ -58,7 +58,7 @@ Cursor IDE
    
    使用提供的脚本一键设置:
    ```bash
-   ~/Code/sync-http-mcp/scripts/setup-tunnel.sh bjhw-sys-rpm0221.bjhw.baidu.com 8081
+   ~/Code/sync-http-mcp/scripts/setup-tunnel.sh [hostname_or_ip] 8081
    ```
 
 2. **手动设置**
@@ -68,7 +68,7 @@ Cursor IDE
    # 打开新终端窗口
    relay-cli
    # 连接成功后
-   ssh -N -L 8081:localhost:8081 bjhw-sys-rpm0221.bjhw.baidu.com
+   ssh -N -L 8081:localhost:8081 [hostname_or_ip]
    ```
 
 ### 2.3 Cursor插件设置

@@ -32,7 +32,7 @@
 ```bash
 # 登录到内网服务器
 relay-cli
-ssh bjhw-sys-rpm0221.bjhw.baidu.com
+ssh [hostname_or_ip]
 
 # 启动简化版服务器
 cd ~/sync-http-mcp
@@ -42,7 +42,7 @@ python src/remote_server.py --port 8081 --host 127.0.0.1
 **本地测试:**
 ```bash
 # 在新终端设置端口转发
-./scripts/setup-tunnel.sh bjhw-sys-rpm0221.bjhw.baidu.com 8081
+./scripts/setup-tunnel.sh [hostname_or_ip] 8081
 
 # 测试API连通性
 curl http://localhost:8081

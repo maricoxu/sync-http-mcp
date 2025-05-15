@@ -93,7 +93,7 @@ POST /api/v1/sessions
 Request:
 {
   "project_id": "xblas_project",
-  "server": "bjhw-sys-rpm0221.bjhw.baidu.com",
+  "server": "[hostname_or_ip]",
   "remote_path": "/home/xuyehua/projects/xblas",
   "build_command": "cd /home/xuyehua/projects/xblas && make"
 }
